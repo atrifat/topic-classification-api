@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 import pandas as pd
 from flask import Flask, request, jsonify
+from flask_caching import Cache
 import datetime
 import logging
 import functools
@@ -19,6 +20,9 @@ TOPIC_CLASSIFICATION_MODEL = os.getenv(
     "TOPIC_CLASSIFICATION_MODEL",
     "cardiffnlp/twitter-roberta-base-dec2021-tweet-topic-multi-all",
 )
+
+CACHE_DURATION_SECONDS = int(os.getenv("CACHE_DURATION_SECONDS", 60))
+ENABLE_CACHE = os.getenv("ENABLE_CACHE", "false") == "true"
 
 APP_VERSION = "0.0.1"
 
@@ -40,7 +44,16 @@ else:
 
 if ENABLE_API_TOKEN and API_TOKEN == "":
     raise Exception("API_TOKEN is required if ENABLE_API_TOKEN is enabled")
+
 app = Flask(__name__)
+
+cache_config = {
+    "DEBUG": True if APP_ENV != "production" else False,
+    "CACHE_TYPE": "SimpleCache" if ENABLE_CACHE else "NullCache",
+    "CACHE_DEFAULT_TIMEOUT": CACHE_DURATION_SECONDS,  # Cache duration in seconds
+}
+cache = Cache(config=cache_config)
+cache.init_app(app)
 
 topic_classification_task = pipeline(
     "text-classification",
@@ -75,6 +88,16 @@ def api_required(func):
     return decorator
 
 
+def make_key_fn():
+    """A function which is called to derive the key for a computed value.
+       The key in this case is the concat value of all the json request
+       parameters. Other strategy could to use any hashing function.
+    :returns: unique string for which the value should be cached.
+    """
+    user_data = request.get_json()
+    return ",".join([f"{key}={value}" for key, value in user_data.items()])
+
+
 def perform_topic_classification(query):
     tokenizer_kwargs = {"truncation": True, "max_length": 512}
 
@@ -96,6 +119,7 @@ def handle_exception(error):
 
 @app.route("/predict", methods=["POST"])
 @api_required
+@cache.cached(make_cache_key=make_key_fn)
 def predict():
     data = request.json
     q = data["q"]
